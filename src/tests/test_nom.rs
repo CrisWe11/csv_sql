@@ -4,7 +4,7 @@ mod test_nom {
     use nom::character::complete::{alpha1, alphanumeric0, alphanumeric1, char, multispace0, space0};
     use nom::{IResult, Parser};
     use nom::branch::alt;
-    use nom::sequence::{delimited, pair, Tuple};
+    use nom::sequence::{delimited, pair, preceded, Tuple};
     use nom::character::{is_alphanumeric, is_space};
     use nom::combinator::recognize;
     use nom::error::ParseError;
@@ -18,11 +18,19 @@ mod test_nom {
 
     #[derive(Debug)]
     struct SelectField {
-        fields: String,
+        field: String,
+        alias: Option<String>,
+    }
+
+    fn optional<'a, F, O, E: ParseError<&'a str>>(inner: F) -> impl Parser<Option<&'a str>, O, E>
+        where F: Parser<&'a str, O, E>
+    {
+
     }
 
     fn ws<'a, F, O, E: ParseError<&'a str>>(inner: F) -> impl Parser<&'a str, O, E>
-        where F: Parser<&'a str, O, E> {
+        where F: Parser<&'a str, O, E>
+    {
         delimited(
             multispace0,
             inner,
@@ -40,9 +48,9 @@ mod test_nom {
     }
 
     fn select_field(input: &str) -> IResult<&str, SelectField> {
-        let (input, f) = identifier(input)?;
+        let (input, f) = (identifier).parse(input)?;
         Ok((
-            input, SelectField { fields: String::from(f) }
+            input, SelectField { field: String::from(f) }
         ))
     }
 
