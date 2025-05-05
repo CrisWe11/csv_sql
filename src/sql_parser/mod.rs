@@ -1,20 +1,18 @@
-
 #[cfg(test)]
 mod test;
 
 use nom::branch::alt;
-use nom::bytes::complete::{is_not, tag, tag_no_case, take_until, take_while, take_while1};
+use nom::bytes::complete::{tag, tag_no_case};
 use nom::character::complete::{
-    alpha1, alphanumeric0, alphanumeric1, char, multispace0, multispace1, space0,
+    alpha1, alphanumeric1, multispace0, multispace1,
 };
-use nom::combinator::{not, recognize};
+use nom::combinator::{recognize, verify};
 use nom::error::{ErrorKind, ParseError};
 use nom::multi::{many0_count, separated_list1};
-use nom::sequence::{delimited, pair, preceded, separated_pair, tuple, Tuple};
-use nom::Err::Error;
-use nom::{error, Compare, IResult, InputIter, InputLength, InputTake, Parser};
+use nom::sequence::{delimited, pair, separated_pair, tuple, Tuple};
+use nom::{Compare, IResult, InputIter, InputLength, InputTake, Parser};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct Select {
     fields: Vec<SelectField>,
     table: String,
@@ -26,7 +24,7 @@ impl Select {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct SelectField {
     field: String,
     alias: Option<String>,
@@ -45,36 +43,23 @@ where
     delimited(multispace0, inner, multispace0)
 }
 
-pub fn not2<I, O, E: ParseError<I>, F>(mut parser: F) -> impl FnMut(I) -> IResult<(), I, E>
-where
-    F: Parser<I, O, E>,
-    I: Clone,
-{
-    move |input: I| {
-        let i = input.clone();
-        match parser.parse(input) {
-            Ok(_) => Err(nom::Err::Error(E::from_error_kind(i, ErrorKind::Not))),
-            Err(_) => Ok(((), i)),
-        }
-    }
+pub fn raw_identifier(input: &str) -> IResult<&str, &str> {
+    recognize(pair(
+        alt((alpha1, tag("_"))),
+        many0_count(alt((alphanumeric1, tag("_")))),
+    ))
+    .parse(input)
 }
 
 macro_rules! identifier {
-        ($($x: literal),*) => (
-            pub fn identifier<'a, E: ParseError<&'a str>>(input: &'a str) -> IResult<&'a str, &'a str, E> {
-                let (new_input, output) = recognize(
-                    pair(
-                        alt((alpha1, tag("_"))),
-                        many0_count(alt((alphanumeric1, tag("_")))),
-                    )
-                ).parse(input)?;
-                match output {
-                    $($x)|* => Err(Error(E::from_error_kind(input, ErrorKind::Tag))),
-                    _ => Ok((new_input, output))
-                }
-            }
-        );
-    }
+    ($($x: literal),*) => {
+        pub fn identifier(
+            input: &str,
+        ) -> IResult<&str, &str> {
+            verify(raw_identifier, |output: &str| ![$($x, $x.to_uppercase().as_str()),*].contains(&output)).parse(input)
+        }
+    };
+}
 
 identifier!("from", "as", "select", "into", "delete", "alter");
 
@@ -84,7 +69,7 @@ fn table(input: &str) -> IResult<&str, &str> {
 
 fn field_col(input: &str) -> IResult<&str, SelectField> {
     let (input, output) = identifier(input)?;
-    if !input.is_empty() {
+    if input.is_empty() {
         Err(nom::Err::Error(ParseError::from_error_kind(
             input,
             ErrorKind::Fail,
