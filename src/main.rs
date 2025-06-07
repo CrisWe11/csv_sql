@@ -1,5 +1,5 @@
 #[allow(dead_code, unused_imports, unused_variables)]
-mod sql_parser;
+mod sql;
 
 fn main() {
     println!("Hello, world!");

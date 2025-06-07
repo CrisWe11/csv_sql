@@ -1,41 +1,18 @@
-mod expression;
-#[cfg(test)]
-mod test;
-
-use std::os::unix::raw::ino_t;
-use crate::sql_parser::expression::Expression::Literal;
-use crate::sql_parser::expression::{BinaryOperator, LiteralValue, UnaryOperator};
-use expression::Expression;
+use crate::sql::error::{SelectError, SqlParseError};
+use crate::sql::expression::{BinOp, BinaryOperator, Exp, Expression, LiteralValue};
+use crate::sql::select::{FieldId, SelectClause};
 use nom::branch::alt;
-use nom::bytes::complete::{escaped_transform, tag, tag_no_case, take_until, take_until1};
+use nom::bytes::complete::{escaped_transform, tag, tag_no_case};
 use nom::character::complete::{
-    alpha1, alphanumeric1, char, multispace0, multispace1, none_of, one_of, space1,
+    alpha1, alphanumeric1, char, multispace0, multispace1, none_of, one_of,
 };
-use nom::combinator::{map, recognize, value, verify};
-use nom::error::{ErrorKind, ParseError};
+use nom::combinator::{consumed, map, peek, recognize, value, verify};
+use nom::error::ParseError;
 use nom::multi::{many0, many0_count, many1, separated_list0, separated_list1};
-use nom::sequence::{delimited, pair, separated_pair, terminated};
-use nom::Err;
-use nom::{Compare, IResult, Parser};
+use nom::sequence::{delimited, pair, terminated};
+use nom::{IResult, Parser};
 
-trait SelectField {}
-
-#[derive(Debug, PartialEq)]
-struct SelectClause {
-    exprs: Vec<Expression>,
-    table: String,
-}
-
-impl SelectClause {
-    fn new(fields: Vec<Expression>, table: String) -> Self {
-        SelectClause {
-            exprs: fields,
-            table,
-        }
-    }
-}
-
-fn ws<'a, F, O, E: ParseError<&'a str>>(inner: F) -> impl Parser<&'a str, Output = O, Error = E>
+pub fn ws<'a, F, O, E: ParseError<&'a str>>(inner: F) -> impl Parser<&'a str, Output = O, Error = E>
 where
     F: Parser<&'a str, Output = O, Error = E>,
 {
@@ -43,7 +20,9 @@ where
 }
 
 macro_rules! wss {
-    ($inner:expr) => {delimited(multispace0, $inner, multispace0)};
+    ($inner:expr) => {
+        delimited(multispace0, $inner, multispace0)
+    };
 }
 
 pub fn raw_identifier(input: &str) -> IResult<&str, &str> {
@@ -72,7 +51,7 @@ macro_rules! declare_binary_operator {
             map(
                 tag_no_case($key),
                 |op| match op {
-                    $key => $value,
+                    $key => BinaryOperator::new($value, op),
                     _ => unreachable!("unrecognized binary operator"),
                 },
             ).parse(input)
@@ -85,7 +64,7 @@ macro_rules! declare_binary_operator {
                     $(tag_no_case($key)),*
                 ),),
                 |op| match op {
-                    $($key => $value,)*
+                    $($key => BinaryOperator::new($value, op),)*
                     _ => unreachable!("unrecognized binary operator"),
                 },
             ).parse(input)
@@ -111,44 +90,40 @@ macro_rules! declare_binary_operator {
 // | 12 | 条件运算符 | `CASE`, `WHEN`, `THEN`, `ELSE` | 从右到左 |
 // | 13 | 赋值运算符 | `:=` | 从右到左 |
 
-declare_binary_operator!(binop5, {"*" => BinaryOperator::Multiply, "/" => BinaryOperator::Divide, "%" => BinaryOperator::Modulo});
-declare_binary_operator!(binop4, {"+" => BinaryOperator::Add, "-" => BinaryOperator::Subtract});
-declare_binary_operator!(binop3, {">=" => BinaryOperator::GtEq, "<=" => BinaryOperator::LtEq, "<" => BinaryOperator::Lt, ">" => BinaryOperator::Gt, "=" => BinaryOperator::Eq, "!=" => BinaryOperator::NotEq, "<>" => BinaryOperator::NotEq});
-declare_binary_operator!(binop2, {"AND" => BinaryOperator::And});
-declare_binary_operator!(binop1, {"OR" => BinaryOperator::Or});
+declare_binary_operator!(binop5, {"*" => BinOp::Multiply, "/" => BinOp::Divide, "%" => BinOp::Modulo});
+declare_binary_operator!(binop4, {"+" => BinOp::Add, "-" => BinOp::Subtract});
+declare_binary_operator!(binop3, {">=" => BinOp::GtEq, "<=" => BinOp::LtEq, "<" => BinOp::Lt, ">" => BinOp::Gt, "=" => BinOp::Eq, "!=" => BinOp::NotEq, "<>" => BinOp::NotEq});
+declare_binary_operator!(binop2, {"AND" => BinOp::And});
+declare_binary_operator!(binop1, {"OR" => BinOp::Or});
 
-
-fn unary_op(input: &str) -> IResult<&str, Expression> {
+pub fn unary_op(input: &str) -> IResult<&str, Expression> {
     todo!()
 }
 
-fn function_call(input: &str) -> IResult<&str, Expression> {
-    let (input, (name, args)) = (
+pub fn function_call(input: &str) -> IResult<&str, Expression> {
+    let (input, (consumed_input, (name, args))) = consumed((
         identifier,
         delimited(
             tag("("),
             wss!(separated_list0(wss!(tag(",")), expression)),
             tag(")"),
         ),
-    )
-        .parse(input)?;
+    ))
+    .parse(input)?;
 
     Ok((
         input,
-        Expression::FunctionCall {
-            name: name.into(),
-            args,
-        },
+        Expression::new_function_call(name, args, consumed_input),
     ))
 }
 
-fn decimal(input: &str) -> IResult<&str, i128> {
+pub fn decimal(input: &str) -> IResult<&str, i128> {
     let (i, o) =
         recognize(many1(terminated(one_of("0123456789"), many0(char('_'))))).parse(input)?;
     Ok((i, o.parse().unwrap()))
 }
 
-fn string_literal(input: &str) -> IResult<&str, String> {
+pub fn string_literal(input: &str) -> IResult<&str, String> {
     delimited(
         tag("'"),
         escaped_transform(
@@ -171,37 +146,17 @@ fn string_literal(input: &str) -> IResult<&str, String> {
     .parse(input)
 }
 
-fn literal(input: &str) -> IResult<&str, Expression> {
+pub fn literal(input: &str) -> IResult<&str, Expression> {
     alt((
-        map(string_literal, |s| {
-            Expression::Literal(LiteralValue::String(s))
+        map(consumed(string_literal), |(consumed_input, s)| {
+            Expression::new_literal(LiteralValue::String(s), consumed_input)
         }),
-        map(decimal, |i| Expression::Literal(LiteralValue::Integer(i))),
+        map(consumed(decimal), |(consumed_input, i)| {
+            Expression::new_literal(LiteralValue::Integer(i), consumed_input)
+        }),
     ))
     .parse(input)
 }
-
-// macro_rules! binary_op_inner {
-//     ($input:ident; $prev_name:ident:$prev_parser:ident $cur_name:ident:$cur_parser:ident $($rest_name:ident:$rest_parsers:ident)*) => {
-//         let $cur_name = (
-//             wss!($prev_name),
-//             $cur_parser,
-//             wss!($prev_name),
-//         );
-//         binary_op_inner!($input; $cur_name:$cur_parser $($rest_name:$rest_parsers)*);
-//     };
-//     ($input:ident; $last_name:ident:$last_parser:ident) => {
-//         let (input, (exp1, op, exp2)) = $last_name.parse($input)?;
-//         Ok((
-//             input,
-//             Expression::BinaryOp {
-//                 left: Box::new(exp1),
-//                 op,
-//                 right: Box::new(exp2),
-//             },
-//         ))
-//     };
-// }
 
 macro_rules! binary_op_fn {
     ($prev_name:ident:$prev_parser:ident $cur_name:ident:$cur_parser:ident $($rest_name:ident:$rest_parsers:ident)*) => {
@@ -209,8 +164,8 @@ macro_rules! binary_op_fn {
         binary_op_fn!($cur_name:$cur_parser $($rest_name:$rest_parsers)*);
     };
     (__impl $cur_name:ident $cur_parser:ident $prev_name:ident) => {
-        fn $cur_name(input: &str) -> IResult<&str, Expression> {
-            alt((map((wss!($prev_name),$cur_parser,wss!($cur_name)), |(exp1, op, exp2)| Expression::BinaryOp {left: Box::new(exp1), op, right: Box::new(exp2)}),
+        pub fn $cur_name(input: &str) -> IResult<&str, Expression> {
+            alt((map(consumed((wss!($prev_name),$cur_parser,wss!($cur_name))), |(consumed_input, (exp1, op, exp2))| Expression::new_binary_op(exp1, op, exp2, consumed_input)),
                 $prev_name)).parse(input)
         }
     };
@@ -219,14 +174,14 @@ macro_rules! binary_op_fn {
 
 macro_rules! declare_binary_op {
     ($first_name:ident:$first_parser:ident $($names:ident:$parsers:ident)+) => {
-        fn $first_name(input: &str) -> IResult<&str, Expression> {
+        pub fn $first_name(input: &str) -> IResult<&str, Expression> {
             alt((
                 map(
-                    (
+                    consumed((
                         wss!(alt((expression_in_brackets, expression_except_binary_op))),
                         $first_parser,
                         wss!($first_name),
-                    ), |(exp1, op, exp2)| Expression::BinaryOp {left: Box::new(exp1), op, right: Box::new(exp2)}
+                    )), |(consumed_input, (exp1, op, exp2))| Expression::new_binary_op(exp1, op, exp2, consumed_input)
                 ),
                 wss!(alt((expression_in_brackets, expression_except_binary_op)))
             )).parse(input)
@@ -237,7 +192,7 @@ macro_rules! declare_binary_op {
 
 declare_binary_op!(a:binop5 b:binop4 c:binop3 d:binop2 binary_op:binop1);
 
-fn expression_in_brackets(input: &str) -> IResult<&str, Expression> {
+pub fn expression_in_brackets(input: &str) -> IResult<&str, Expression> {
     delimited(
         tag("("),
         wss!(alt((expression_in_brackets, expression))),
@@ -246,34 +201,59 @@ fn expression_in_brackets(input: &str) -> IResult<&str, Expression> {
     .parse(input)
 }
 
-fn expression_except_binary_op(input: &str) -> IResult<&str, Expression> {
+pub fn expression_except_binary_op(input: &str) -> IResult<&str, Expression> {
     alt((literal, function_call)).parse(input)
 }
 
-fn expression(input: &str) -> IResult<&str, Expression> {
+pub fn expression(input: &str) -> IResult<&str, Expression> {
     alt((binary_op, expression_except_binary_op)).parse(input)
 }
 
-// fn table(input: &str) -> IResult<&str, &str> {
-//     identifier(input)
-// }
+pub fn table(input: &str) -> IResult<&str, &str> {
+    identifier(input)
+}
 
-// fn select_fields(input: &str) -> IResult<&str, Vec<Expression>> {
-//     separated_list1(wss!(tag(",")), expression)(input)
-// }
+pub fn select_fields(input: &str) -> IResult<&str, Vec<(Expression, Option<FieldId>)>> {
+    let expression_as_alias = map(
+        (expression, multispace1, tag("as"), identifier),
+        |(exp, _, _, alias)| (exp, Some(FieldId::Identifier(alias))),
+    );
+    let expression_alias = map((expression, multispace1, identifier), |(exp, _, alias)| {
+        (exp, Some(FieldId::Identifier(alias)))
+    });
+    let expression_no_alias = map(expression, |exp| (exp, Option::<FieldId>::None));
+    separated_list1(
+        wss!(tag(",")),
+        alt((expression_as_alias, expression_alias, expression_no_alias)),
+    )
+    .parse(input)
+}
 
-// fn select_clause(input: &str) -> IResult<&str, SelectClause> {
-//     let select = tag_no_case("select");
-//     let from = tag_no_case("from");
-//     let (input, (_, _, fields, _, _, _, tb)) = (
-//         select,
-//         multispace1,
-//         select_fields,
-//         multispace1,
-//         from,
-//         multispace1,
-//         table,
-//     )
-//         .parse(input)?;
-//     Ok((input, SelectClause::new(fields, String::from(tb))))
-// }
+pub fn select_clause(input: &str) -> IResult<&str, SelectClause, SqlParseError<&str>> {
+    // TODO: remove error type dedication here
+    if peek((multispace0::<&str, nom::error::Error<&str>>, tag_no_case("select"), multispace1))
+        .parse(input)
+        .is_err()
+    {
+        // not a select clause, will not do further parsing
+        // try other branches maybe
+        return Err(nom::Err::Error(SqlParseError::SelectError(
+            SelectError::NotSelectClause,
+        )));
+    }
+
+    // failure will cause a Failure (unrecoverable error)
+    let (input, (_, _, _, fields, _, _, _, tb)) = (
+        multispace0,
+        tag_no_case("select"),
+        multispace1,
+        select_fields,
+        multispace1,
+        tag_no_case("from"),
+        multispace1,
+        table,
+    )
+        .parse(input)
+        .map_err(|e| SelectError::from(e))?;
+    Ok((input, SelectClause::new(fields, tb)?))
+}
